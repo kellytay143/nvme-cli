@@ -33,6 +33,9 @@ nvme-list \- List all recognized NVMe devices
 .sp
 .nf
 \fInvme list\fR [\-o <fmt> | \-\-output\-format=<fmt>]
+		[\-c | \-\-controller]
+		[\-n | \-\-namespace]
+		[\-l | \-\-legacy]
 .fi
 .SH "DESCRIPTION"
 .sp
@@ -45,6 +48,21 @@ Set the reporting format to
 \fInormal\fR
 or
 \fIjson\fR\&. Only one output format can be used at a time\&.
+.RE
+.PP
+\-c, \-\-controller
+.RS 4
+Include only controller devices in output\&.
+.RE
+.PP
+\-n, \-\-namespace
+.RS 4
+Include only namespace devices in output\&.
+.RE
+.PP
+\-l, \-\-legacy
+.RS 4
+Print legacy output format\&.
 .RE
 .SH "ENVIRONMENT"
 .sp

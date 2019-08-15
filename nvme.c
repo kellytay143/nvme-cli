@@ -1913,7 +1913,6 @@ static int get_ns_nvme_info(int fd, struct list_item *item, const char *node)
 
 static const char *dev = "/dev/";
 
-/* Assume every block device starting with /dev/nvme is an nvme namespace */
 static int scan_ctrl_dev_filter(const struct dirent *d)
 {
 	char path[264];
@@ -1961,28 +1960,32 @@ static int scan_ns_dev_filter(const struct dirent *d)
 static int list(int argc, char **argv, struct command *cmd, struct plugin *plugin)
 {
 	char path[264];
-    struct dirent **ctrl_devices = NULL, **ns_devices = NULL;
-    struct list_item *ctrl_list_items = NULL, *ns_list_items = NULL;
-    unsigned int ns_list_cnt = 0;
-    unsigned int ctrl_list_cnt = 0;
-    int fmt, ret, fd, i, n = 0, m = 0;
+	struct dirent **ctrl_devices = NULL, **ns_devices = NULL;
+	struct list_item *ctrl_list_items = NULL, *ns_list_items = NULL;
+	struct subsys_list_item *slist;
+	char *subsysnqn = NULL;
+	unsigned int ns_list_cnt = 0, ctrl_list_cnt = 0;
+	int fmt, ret, fd, i, n = 0, m = 0, subcnt = 0;
 	const char *desc = "Retrieve basic information for all NVMe namespaces";
 	struct config {
 		char *output_format;
-        bool controller;
-        bool namespace;
+		bool controller;
+		bool namespace;
+		bool legacy;
 	};
 
 	struct config cfg = {
 		.output_format = "normal",
-        .controller = false,
-        .namespace = false,
+		.controller = false,
+		.namespace = false,
+		.legacy = false,
 	};
 
 	const struct argconfig_commandline_options opts[] = {
 		{"output-format", 'o', "FMT", CFG_STRING, &cfg.output_format, required_argument, "Output Format: normal|json"},
-        {"controller",    'c', "",    CFG_NONE,   &cfg.controller,    no_argument, "Include controller devices in output"},
-        {"namespace",     'n', "",    CFG_NONE,   &cfg.namespace,     no_argument, "Include namespace devices in output"},
+		{"controller",    'c', "",    CFG_NONE,   &cfg.controller,    no_argument, "Include controller devices in output"},
+		{"namespace",     'n', "",    CFG_NONE,   &cfg.namespace,     no_argument, "Include namespace devices in output"},
+		{"legacy",	  'l', "",    CFG_NONE,   &cfg.legacy,	      no_argument, "Print legacy output"},
 		{NULL}
 	};
 
@@ -1997,15 +2000,20 @@ static int list(int argc, char **argv, struct command *cmd, struct plugin *plugi
 		goto ret;
 	}
 
-    if (cfg.controller == false && cfg.namespace == false) {
-        cfg.controller = true;
-        cfg.namespace = true;
-    }
-	
-    if (cfg.controller) {
-        n = scandir(dev, &ctrl_devices, scan_ctrl_dev_filter, alphasort);
-        if (n < 0) {
-            fprintf(stderr, "Failed to scan controllers: %s\n",
+    /*Legacy printing takes precedence over namespace/controller specific printing */
+	if (cfg.legacy == true) {
+		cfg.controller = false;
+		cfg.namespace = true;
+	}
+	if (cfg.controller == false && cfg.namespace == false) {
+		cfg.controller = true;
+		cfg.namespace = true;
+	}
+
+	if (cfg.controller) {
+		n = scandir(dev, &ctrl_devices, scan_ctrl_dev_filter, alphasort);
+		if (n < 0) {
+			fprintf(stderr, "Failed to scan controllers: %s\n",
 					strerror(errno));
 			ret = n;
 			goto ret;
@@ -2017,7 +2025,7 @@ static int list(int argc, char **argv, struct command *cmd, struct plugin *plugi
 			ret = -ENOMEM;
 			goto cleanup_devices;
 		}
- 	}
+	}
 	if (cfg.namespace) {
 		m = scandir(dev, &ns_devices, scan_ns_dev_filter, alphasort);
 		if (m < 0) {
@@ -2026,6 +2034,7 @@ static int list(int argc, char **argv, struct command *cmd, struct plugin *plugi
 			ret = m;
 			goto ret;
 		}
+
 		ns_list_items = calloc(m, sizeof(*ns_list_items));
 		if (!ns_list_items) {
 			fprintf(stderr, "can not allocate namespace list payload\n");
@@ -2037,7 +2046,7 @@ static int list(int argc, char **argv, struct command *cmd, struct plugin *plugi
 	if (n == 0 && m == 0) {
 		fprintf(stderr, "no NVMe device(s) detected.\n");
 		return 0;
- 	}
+	}
 
 	for (i = 0; i < n; i++) {
 		snprintf(path, sizeof(path), "%s%s", dev, ctrl_devices[i]->d_name);
@@ -2058,7 +2067,7 @@ static int list(int argc, char **argv, struct command *cmd, struct plugin *plugi
 		} else {
 			fprintf(stderr, "%s: failed to obtain controller info: %s\n",
 					path, strerror(-ret));
-        }
+		}
 	}
 
 	for (i = 0; i < m; i++) {
@@ -2069,7 +2078,7 @@ static int list(int argc, char **argv, struct command *cmd, struct plugin *plugi
 					strerror(errno));
 			ret = -errno;
 			goto cleanup_list_items;
- 		}
+		}
 		ret = get_ns_nvme_info(fd, &ns_list_items[ns_list_cnt], path);
 		close(fd);
 		if (ret == 0) {
@@ -2079,45 +2088,58 @@ static int list(int argc, char **argv, struct command *cmd, struct plugin *plugi
 					show_nvme_status(ret);
 		} else {
 			fprintf(stderr, "%s: failed to obtain namespace info: %s\n",
- 					path, strerror(-ret));
- 		}
- 	}
+					path, strerror(-ret));
+		}
+	}
 
-	if (cfg.controller && cfg.namespace) {
+	slist = get_subsys_list(&subcnt, NULL, NVME_NSID_ALL);
+
+	if (cfg.controller && cfg.namespace && cfg.legacy == false) {
 		if (fmt == JSON)
-			json_print_list_items(ctrl_list_items, ctrl_list_cnt, ns_list_items, ns_list_cnt);
+			json_print_list_items(ctrl_list_items, ctrl_list_cnt, ns_list_items, ns_list_cnt, slist);
 		else
-			show_list_items(ctrl_list_items, ctrl_list_cnt, ns_list_items, ns_list_cnt);
-	} else if (cfg.controller) {
+			show_list_items(ctrl_list_items, ctrl_list_cnt, ns_list_items, ns_list_cnt, slist);
+	} else if (cfg.controller && cfg.legacy == false) {
 		if (fmt == JSON)
 			json_print_ctrl_list_items(ctrl_list_items, ctrl_list_cnt);
 		else
 			show_ctrl_list_items(ctrl_list_items, ctrl_list_cnt);
-	} else if (cfg.namespace) {
- 		if (fmt == JSON)
-			json_print_ns_list_items(ns_list_items, ns_list_cnt);
- 		else
-			show_ns_list_items(ns_list_items, ns_list_cnt);
- 	}
- 
-cleanup_list_items:
+	} else if (cfg.namespace && cfg.legacy == false) {
+		if (fmt == JSON)
+			json_print_ns_list_items(ns_list_items, ns_list_cnt, slist);
+		else
+			show_ns_list_items(ns_list_items, ns_list_cnt, slist);
+	}
+
+	if (cfg.legacy) {
+		if (fmt == JSON)
+			json_print_legacy_list_items(ns_list_items, ns_list_cnt);
+		else
+			show_legacy_list_items(ns_list_items, ns_list_cnt);
+	}
+
+	free_subsys_list(slist, subcnt);
+	if (subsysnqn)
+		free(subsysnqn);
+
+ cleanup_list_items:
 	if (ctrl_list_items)
 		free(ctrl_list_items);
 	if (ns_list_items)
 		free(ns_list_items);
- 
-cleanup_devices:
+
+ cleanup_devices:
 	if (ctrl_devices) {
 		for (i = 0; i < n; i++)
-            free(ctrl_devices[i]);
-        free(ctrl_devices);
-    }
+			free(ctrl_devices[i]);
+		free(ctrl_devices);
+	}
 	if (ns_devices) {
-        for (i = 0; i < m; i++)
-		    free(ns_devices[i]);
-	    free(ns_devices);
-    }
-ret:
+		for (i = 0; i < m; i++)
+			free(ns_devices[i]);
+		free(ns_devices);
+	}
+ ret:
 	return nvme_status_to_errno(ret, false);
 }
 
