@@ -2277,7 +2277,28 @@ void show_lba_status(struct nvme_lba_status *list)
 	}
 }
 
-static void show_list_item(struct list_item list_item)
+static void show_ctrl_list_item(struct list_item list_item)
+{
+	printf("%-16s %-*.*s %-*.*s %-.*s\n", list_item.node,
+		(int)sizeof(list_item.ctrl.sn), (int)sizeof(list_item.ctrl.sn), list_item.ctrl.sn,
+		(int)sizeof(list_item.ctrl.mn), (int)sizeof(list_item.ctrl.mn), list_item.ctrl.mn,
+		(int)sizeof(list_item.ctrl.fr), list_item.ctrl.fr);
+}
+
+void show_ctrl_list_items(struct list_item *list_items, unsigned int len)
+{
+	unsigned int i;
+
+	printf("%-16s %-20s %-40s %-8s\n",
+		"Node", "SN", "Model", "FW Rev");
+	printf("%-16s %-20s %-40s %-8s\n",
+		"----------------", "--------------------",
+		"----------------------------------------", "--------");
+	for (i = 0 ; i < len ; i++)
+		show_ctrl_list_item(list_items[i]);
+}
+
+static void show_ns_list_item(struct list_item list_item)
 {
 	long long int lba = 1 << list_item.ns.lbaf[(list_item.ns.flbas & 0x0f)].ds;
 	double nsze       = le64_to_cpu(list_item.ns.nsze) * lba;
@@ -2294,27 +2315,151 @@ static void show_list_item(struct list_item list_item)
 		nsze, s_suffix);
 	sprintf(format,"%3.0f %2sB + %2d B", (double)lba, l_suffix,
 		le16_to_cpu(list_item.ns.lbaf[(list_item.ns.flbas & 0x0f)].ms));
-	printf("%-16s %-*.*s %-*.*s %-9d %-26s %-16s %-.*s\n", list_item.node,
-            (int)sizeof(list_item.ctrl.sn), (int)sizeof(list_item.ctrl.sn), list_item.ctrl.sn,
-            (int)sizeof(list_item.ctrl.mn), (int)sizeof(list_item.ctrl.mn), list_item.ctrl.mn,
-            list_item.nsid, usage, format, (int)sizeof(list_item.ctrl.fr), list_item.ctrl.fr);
+	printf("%-16s %-9d %-26s %-16s\n", list_item.node, list_item.nsid, usage, format);
 }
 
-void show_list_items(struct list_item *list_items, unsigned len)
+void show_ns_list_items(struct list_item *list_items, unsigned int len)
 {
-	unsigned i;
-
-	printf("%-16s %-20s %-40s %-9s %-26s %-16s %-8s\n",
-	    "Node", "SN", "Model", "Namespace", "Usage", "Format", "FW Rev");
-	printf("%-16s %-20s %-40s %-9s %-26s %-16s %-8s\n",
-            "----------------", "--------------------", "----------------------------------------",
-            "---------", "--------------------------", "----------------", "--------");
-	for (i = 0 ; i < len ; i++)
-		show_list_item(list_items[i]);
-
+	unsigned int i;
+ 
+	printf("%-16s %-9s %-26s %-16s\n", "Node", "Namespace", "Usage", "Format");
+	printf("%-16s %-9s %-26s %-16s\n",
+		"----------------", "---------", "--------------------------", "----------------");
+ 	for (i = 0 ; i < len ; i++)
+		show_ns_list_item(list_items[i]);
 }
 
-void json_print_list_items(struct list_item *list_items, unsigned len)
+void show_list_items(struct list_item *ctrl_list_items, unsigned int ctrl_len,
+				struct list_item *ns_list_items, unsigned int ns_len)
+{
+	unsigned int i, j;
+ 
+	printf("%-16s %-20s %-40s %-8s\n",
+		"Node", "SN", "Model", "FW Rev");
+	printf("%-16s %-20s %-40s %-8s\n",
+		"----------------", "--------------------",
+		"----------------------------------------", "--------");
+	for (i = 0 ; i < ctrl_len ; i++)
+		show_ctrl_list_item(ctrl_list_items[i]);
+	printf("\n");
+	printf("%-16s %-9s %-26s %-16s\n", "Node", "Namespace", "Usage", "Format");
+	printf("%-16s %-9s %-26s %-16s\n",
+		"----------------", "---------", "--------------------------", "----------------");
+	for (j = 0 ; j < ns_len ; j++)
+		show_ns_list_item(ns_list_items[j]);
+}
+
+void json_print_list_items(struct list_item *ctrl_list_items, unsigned int ctrl_len,
+				struct list_item *ns_list_items, unsigned int ns_len)
+{
+ 	struct json_object *root;
+	struct json_array *ctrl_devices, *ns_devices;
+ 	struct json_object *device_attrs;
+ 	char formatter[41] = { 0 };
+	int index, i = 0, j = 0;
+ 	char *product;
+	long long lba;
+ 	double nsze;
+ 	double nuse;
+ 
+ 	root = json_create_object();
+	/*Controllers*/
+	ctrl_devices = json_create_array();
+	for (i = 0; i < ctrl_len; i++) {
+		device_attrs = json_create_object();
+
+		json_object_add_value_string(device_attrs,
+						"DevicePath",
+						ctrl_list_items[i].node);
+
+		format(formatter, sizeof(formatter),
+			ctrl_list_items[i].ctrl.fr,
+			sizeof(ctrl_list_items[i].ctrl.fr));
+
+		json_object_add_value_string(device_attrs,
+						"Firmware",
+						formatter);
+
+		if (sscanf(ctrl_list_items[i].node, "/dev/nvme%d", &index) == 1)
+			json_object_add_value_int(device_attrs,
+						"Index",
+						index);
+
+		format(formatter, sizeof(formatter),
+			ctrl_list_items[i].ctrl.mn,
+			sizeof(ctrl_list_items[i].ctrl.mn));
+
+		json_object_add_value_string(device_attrs,
+						"ModelNumber",
+						formatter);
+
+		product = nvme_product_name(index);
+
+		json_object_add_value_string(device_attrs,
+						"ProductName",
+						product);
+
+		format(formatter, sizeof(formatter),
+			ctrl_list_items[i].ctrl.sn,
+			sizeof(ctrl_list_items[i].ctrl.sn));
+
+		json_object_add_value_string(device_attrs,
+						"SerialNumber",
+						formatter);
+
+		json_array_add_value_object(ctrl_devices, device_attrs);
+
+		free((void *)product);
+	}
+	if (i)
+		json_object_add_value_array(root, "Controllers", ctrl_devices);
+	/*Namespaces*/
+	ns_devices = json_create_array();
+	for (j = 0; j < ns_len; j++) {
+		device_attrs = json_create_object();
+
+		json_object_add_value_string(device_attrs,
+					     "DevicePath",
+					     ns_list_items[j].node);
+
+		if (sscanf(ns_list_items[j].node, "/dev/nvme%d", &index) == 1)
+			json_object_add_value_int(device_attrs,
+						  "Index",
+						  index);
+
+		product = nvme_product_name(index);
+
+		json_object_add_value_string(device_attrs,
+					     "ProductName",
+					     product);
+
+		json_array_add_value_object(ns_devices, device_attrs);
+
+		lba = 1 << ns_list_items[j].ns.lbaf[(ns_list_items[j].ns.flbas & 0x0f)].ds;
+		nsze = le64_to_cpu(ns_list_items[j].ns.nsze) * lba;
+		nuse = le64_to_cpu(ns_list_items[j].ns.nuse) * lba;
+		json_object_add_value_uint(device_attrs,
+					  "UsedBytes",
+					  nuse);
+		json_object_add_value_uint(device_attrs,
+					  "MaximumLBA",
+					  le64_to_cpu(ns_list_items[j].ns.nsze));
+		json_object_add_value_uint(device_attrs,
+					  "PhysicalSize",
+					  nsze);
+		json_object_add_value_uint(device_attrs,
+					  "SectorSize",
+					  lba);
+
+		free((void *)product);
+	}
+	if (j)
+		json_object_add_value_array(root, "Namespaces", ns_devices);
+	json_print_object(root, NULL);
+	json_free_object(root);
+}
+
+void json_print_ctrl_list_items(struct list_item *list_items, unsigned int len)
 {
 	struct json_object *root;
 	struct json_array *devices;
@@ -2322,9 +2467,6 @@ void json_print_list_items(struct list_item *list_items, unsigned len)
 	char formatter[41] = { 0 };
 	int index, i = 0;
 	char *product;
-	long long int lba;
-	double nsze;
-	double nuse;
 
 	root = json_create_object();
 	devices = json_create_array();
@@ -2366,13 +2508,54 @@ void json_print_list_items(struct list_item *list_items, unsigned len)
 					     "ProductName",
 					     product);
 
-		format(formatter, sizeof(formatter),
-		       list_items[i].ctrl.sn,
-		       sizeof(list_items[i].ctrl.sn));
-
 		json_object_add_value_string(device_attrs,
 					     "SerialNumber",
 					     formatter);
+
+		json_array_add_value_object(devices, device_attrs);
+
+		free((void *)product);
+	}
+	if (i)
+		json_object_add_value_array(root, "Controllers", devices);
+	json_print_object(root, NULL);
+    json_free_object(root);
+}
+
+void json_print_ns_list_items(struct list_item *list_items, unsigned int len)
+{
+	struct json_object *root;
+	struct json_array *devices;
+	struct json_object *device_attrs;
+	int index, i = 0;
+	char *product;
+	long long lba;
+	double nsze;
+    double nuse;
+
+	root = json_create_object();
+	devices = json_create_array();
+	for (i = 0; i < len; i++) {
+		device_attrs = json_create_object();
+
+	    json_object_add_value_int(device_attrs,
+	                              "NameSpace",
+	                              list_items[i].nsid);
+
+		json_object_add_value_string(device_attrs,
+					     "DevicePath",
+					     list_items[i].node);
+
+		if (sscanf(list_items[i].node, "/dev/nvme%d", &index) == 1)
+			json_object_add_value_int(device_attrs,
+						  "Index",
+						  index);
+
+		product = nvme_product_name(index);
+        
+        json_object_add_value_string(device_attrs,
+					     "ProductName",
+					     product);
 
 		json_array_add_value_object(devices, device_attrs);
 
@@ -2392,12 +2575,14 @@ void json_print_list_items(struct list_item *list_items, unsigned len)
 					  "SectorSize",
 					  lba);
 
-		free((void*)product);
+		free((void *)product);
 	}
 	if (i)
-		json_object_add_value_array(root, "Devices", devices);
+		json_object_add_value_array(root, "Namespaces", devices);
 	json_print_object(root, NULL);
+    json_free_object(root);
 }
+
 
 void json_nvme_id_ns(struct nvme_id_ns *ns, unsigned int mode)
 {

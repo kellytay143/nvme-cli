@@ -1879,7 +1879,19 @@ ret:
 	return nvme_status_to_errno(ret, false);
 }
 
-static int get_nvme_info(int fd, struct list_item *item, const char *node)
+static int get_ctrl_nvme_info(int fd, struct list_item *item, const char *node)
+{
+	int err;
+
+	err = nvme_identify_ctrl(fd, &item->ctrl);
+	if (err)
+		return err;
+	strcpy(item->node, node);
+
+	return 0;
+}
+
+static int get_ns_nvme_info(int fd, struct list_item *item, const char *node)
 {
 	int err;
 
@@ -1902,7 +1914,29 @@ static int get_nvme_info(int fd, struct list_item *item, const char *node)
 static const char *dev = "/dev/";
 
 /* Assume every block device starting with /dev/nvme is an nvme namespace */
-static int scan_dev_filter(const struct dirent *d)
+static int scan_ctrl_dev_filter(const struct dirent *d)
+{
+	char path[264];
+	struct stat cd;
+	int ctrl, ns, part;
+
+	if (d->d_name[0] == '.')
+		return 0;
+
+	if (strstr(d->d_name, "nvme")) {
+		snprintf(path, sizeof(path), "%s%s", dev, d->d_name);
+		if (stat(path, &cd))
+			return 0;
+		if (!S_ISCHR(cd.st_mode))
+			return 0;
+		if (sscanf(d->d_name, "nvme%dn%dp%d", &ctrl, &ns, &part) == 3)
+			return 0;
+		return 1;
+	}
+	return 0;
+}
+
+static int scan_ns_dev_filter(const struct dirent *d)
 {
 	char path[264];
 	struct stat bd;
@@ -1927,21 +1961,28 @@ static int scan_dev_filter(const struct dirent *d)
 static int list(int argc, char **argv, struct command *cmd, struct plugin *plugin)
 {
 	char path[264];
-	struct dirent **devices;
-	struct list_item *list_items;
-	unsigned int list_cnt = 0;
-	int fmt, ret, fd, i, n;
+    struct dirent **ctrl_devices = NULL, **ns_devices = NULL;
+    struct list_item *ctrl_list_items = NULL, *ns_list_items = NULL;
+    unsigned int ns_list_cnt = 0;
+    unsigned int ctrl_list_cnt = 0;
+    int fmt, ret, fd, i, n = 0, m = 0;
 	const char *desc = "Retrieve basic information for all NVMe namespaces";
 	struct config {
 		char *output_format;
+        bool controller;
+        bool namespace;
 	};
 
 	struct config cfg = {
 		.output_format = "normal",
+        .controller = false,
+        .namespace = false,
 	};
 
 	const struct argconfig_commandline_options opts[] = {
 		{"output-format", 'o', "FMT", CFG_STRING, &cfg.output_format, required_argument, "Output Format: normal|json"},
+        {"controller",    'c', "",    CFG_NONE,   &cfg.controller,    no_argument, "Include controller devices in output"},
+        {"namespace",     'n', "",    CFG_NONE,   &cfg.namespace,     no_argument, "Include namespace devices in output"},
 		{NULL}
 	};
 
@@ -1956,58 +1997,126 @@ static int list(int argc, char **argv, struct command *cmd, struct plugin *plugi
 		goto ret;
 	}
 
-	n = scandir(dev, &devices, scan_dev_filter, alphasort);
-	if (n < 0) {
-		fprintf(stderr, "no NVMe device(s) detected.\n");
-		ret = n;
-		goto ret;
+    if (cfg.controller == false && cfg.namespace == false) {
+        cfg.controller = true;
+        cfg.namespace = true;
+    }
+	
+    if (cfg.controller) {
+        n = scandir(dev, &ctrl_devices, scan_ctrl_dev_filter, alphasort);
+        if (n < 0) {
+            fprintf(stderr, "Failed to scan controllers: %s\n",
+					strerror(errno));
+			ret = n;
+			goto ret;
+		}
+
+		ctrl_list_items = calloc(n, sizeof(*ctrl_list_items));
+		if (!ctrl_list_items) {
+			fprintf(stderr, "can not allocate controller list payload\n");
+			ret = -ENOMEM;
+			goto cleanup_devices;
+		}
+ 	}
+	if (cfg.namespace) {
+		m = scandir(dev, &ns_devices, scan_ns_dev_filter, alphasort);
+		if (m < 0) {
+			fprintf(stderr, "Failed to scan namespaces: %s\n",
+					strerror(errno));
+			ret = m;
+			goto ret;
+		}
+		ns_list_items = calloc(m, sizeof(*ns_list_items));
+		if (!ns_list_items) {
+			fprintf(stderr, "can not allocate namespace list payload\n");
+			ret = -ENOMEM;
+			goto cleanup_devices;
+		}
 	}
 
-	list_items = calloc(n, sizeof(*list_items));
-	if (!list_items) {
-		fprintf(stderr, "can not allocate controller list payload\n");
-		ret = -ENOMEM;
-		goto cleanup_devices;
-	}
+	if (n == 0 && m == 0) {
+		fprintf(stderr, "no NVMe device(s) detected.\n");
+		return 0;
+ 	}
 
 	for (i = 0; i < n; i++) {
-		snprintf(path, sizeof(path), "%s%s", dev, devices[i]->d_name);
+		snprintf(path, sizeof(path), "%s%s", dev, ctrl_devices[i]->d_name);
 		fd = open(path, O_RDONLY);
 		if (fd < 0) {
-			fprintf(stderr, "Failed to open %s: %s\n", path,
+			fprintf(stderr, "Failed to open controller %s: %s\n", path,
 					strerror(errno));
 			ret = -errno;
 			goto cleanup_list_items;
 		}
-		ret = get_nvme_info(fd, &list_items[list_cnt], path);
+		ret = get_ctrl_nvme_info(fd, &ctrl_list_items[ctrl_list_cnt], path);
 		close(fd);
 		if (ret == 0) {
-			list_cnt++;
-		}
-		else if (ret > 0) {
-			fprintf(stderr, "identify failed\n");
-			show_nvme_status(ret);
-		}
-		else {
-			fprintf(stderr, "%s: failed to obtain nvme info: %s\n",
+			ctrl_list_cnt++;
+		} else if (ret > 0) {
+			fprintf(stderr, "Controller identify failed\n");
+					show_nvme_status(ret);
+		} else {
+			fprintf(stderr, "%s: failed to obtain controller info: %s\n",
 					path, strerror(-ret));
-		}
+        }
 	}
 
-	if (list_cnt) {
+	for (i = 0; i < m; i++) {
+		snprintf(path, sizeof(path), "%s%s", dev, ns_devices[i]->d_name);
+		fd = open(path, O_RDONLY);
+		if (fd < 0) {
+			fprintf(stderr, "Failed to open namespace %s: %s\n", path,
+					strerror(errno));
+			ret = -errno;
+			goto cleanup_list_items;
+ 		}
+		ret = get_ns_nvme_info(fd, &ns_list_items[ns_list_cnt], path);
+		close(fd);
+		if (ret == 0) {
+			ns_list_cnt++;
+		} else if (ret > 0) {
+			fprintf(stderr, "Namespace identify failed\n");
+					show_nvme_status(ret);
+		} else {
+			fprintf(stderr, "%s: failed to obtain namespace info: %s\n",
+ 					path, strerror(-ret));
+ 		}
+ 	}
+
+	if (cfg.controller && cfg.namespace) {
 		if (fmt == JSON)
-			json_print_list_items(list_items, list_cnt);
+			json_print_list_items(ctrl_list_items, ctrl_list_cnt, ns_list_items, ns_list_cnt);
 		else
-			show_list_items(list_items, list_cnt);
-	}
-
+			show_list_items(ctrl_list_items, ctrl_list_cnt, ns_list_items, ns_list_cnt);
+	} else if (cfg.controller) {
+		if (fmt == JSON)
+			json_print_ctrl_list_items(ctrl_list_items, ctrl_list_cnt);
+		else
+			show_ctrl_list_items(ctrl_list_items, ctrl_list_cnt);
+	} else if (cfg.namespace) {
+ 		if (fmt == JSON)
+			json_print_ns_list_items(ns_list_items, ns_list_cnt);
+ 		else
+			show_ns_list_items(ns_list_items, ns_list_cnt);
+ 	}
+ 
 cleanup_list_items:
-	free(list_items);
-
+	if (ctrl_list_items)
+		free(ctrl_list_items);
+	if (ns_list_items)
+		free(ns_list_items);
+ 
 cleanup_devices:
-	for (i = 0; i < n; i++)
-		free(devices[i]);
-	free(devices);
+	if (ctrl_devices) {
+		for (i = 0; i < n; i++)
+            free(ctrl_devices[i]);
+        free(ctrl_devices);
+    }
+	if (ns_devices) {
+        for (i = 0; i < m; i++)
+		    free(ns_devices[i]);
+	    free(ns_devices);
+    }
 ret:
 	return nvme_status_to_errno(ret, false);
 }
